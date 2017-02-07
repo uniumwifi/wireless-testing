@@ -168,6 +168,13 @@ static ssize_t ieee80211_if_write_##name(struct file *file,		\
 	IEEE80211_IF_FMT_##format(name, field)				\
 	IEEE80211_IF_FILE_R(name)
 
+#define NETDEV_OPS(name)	\
+static const struct file_operations name##_ops = {		\
+	.read = netdev_##name##_read,					\
+	.open = simple_open,						\
+	.llseek = generic_file_llseek,					\
+}
+
 /* common attributes */
 IEEE80211_IF_FILE(rc_rateidx_mask_2ghz, rc_rateidx_mask[NL80211_BAND_2GHZ],
 		  HEX);
@@ -235,6 +242,28 @@ ieee80211_if_fmt_hw_queues(const struct ieee80211_sub_if_data *sdata,
 	return len;
 }
 IEEE80211_IF_FILE_R(hw_queues);
+
+static ssize_t ieee80211_if_fmt_logging(
+	const struct ieee80211_sub_if_data *sdata, char *buf, int buflen)
+{
+	return scnprintf(buf, buflen, "%s\n",
+	    sdata->enable_debug_logs ? "on" : "off");
+}
+
+static ssize_t ieee80211_if_parse_logging(
+	struct ieee80211_sub_if_data *sdata, const char *buf, int buflen)
+{
+	if (strncmp(buf, "on", 2) == 0)
+		sdata->enable_debug_logs = true;
+	else if (strncmp(buf, "off", 3) == 0)
+		sdata->enable_debug_logs = false;
+	else
+		return -EINVAL;
+
+	return buflen;
+}
+
+IEEE80211_IF_FILE_RW(logging);
 
 /* STA attributes */
 IEEE80211_IF_FILE(bssid, u.mgd.bssid, MAC);
@@ -652,6 +681,7 @@ IEEE80211_IF_FILE(dot11MeshAwakeWindowDuration,
 
 static void add_common_files(struct ieee80211_sub_if_data *sdata)
 {
+	DEBUGFS_ADD_MODE(logging, 0600);
 	DEBUGFS_ADD(rc_rateidx_mask_2ghz);
 	DEBUGFS_ADD(rc_rateidx_mask_5ghz);
 	DEBUGFS_ADD(rc_rateidx_mcs_mask_2ghz);

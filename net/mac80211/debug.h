@@ -104,7 +104,7 @@ do {									\
 
 #define _sdata_dbg(print, sdata, fmt, ...)				\
 do {									\
-	if (print)							\
+	if (sdata->enable_debug_logs && print)				\
 		pr_debug("%s: " fmt,					\
 			 (sdata)->name, ##__VA_ARGS__);			\
 } while (0)

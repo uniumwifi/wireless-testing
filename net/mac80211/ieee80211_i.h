@@ -875,6 +875,7 @@ struct ieee80211_sub_if_data {
 
 	unsigned long state;
 
+	bool enable_debug_logs;
 	char name[IFNAMSIZ];
 
 	/* Fragment table for host-based reassembly */
