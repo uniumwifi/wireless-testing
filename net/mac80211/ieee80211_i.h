@@ -330,6 +330,11 @@ struct mesh_preq_queue {
 	u8 flags;
 };
 
+struct mesh_tx_queue {
+	struct list_head list;
+	struct sk_buff *skb;
+};
+
 struct ieee80211_roc_work {
 	struct list_head list;
 
@@ -670,6 +675,11 @@ struct ieee80211_if_mesh {
 	spinlock_t mesh_preq_queue_lock;
 	struct mesh_preq_queue preq_queue;
 	int preq_queue_len;
+	/* Spinlock for trasmitted MPATH frames */
+	spinlock_t mesh_tx_queue_lock;
+	struct mesh_tx_queue tx_queue;
+	int tx_queue_len;
+
 	struct mesh_stats mshstats;
 	struct mesh_config mshcfg;
 	atomic_t estab_plinks;
@@ -919,6 +929,7 @@ struct ieee80211_sub_if_data {
 
 	struct work_struct work;
 	struct sk_buff_head skb_queue;
+	struct delayed_work tx_work;
 
 	u8 needed_rx_chains;
 	enum ieee80211_smps_mode smps_mode;

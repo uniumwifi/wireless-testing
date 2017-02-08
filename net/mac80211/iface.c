@@ -778,6 +778,59 @@ static int ieee80211_open(struct net_device *dev)
 	return ieee80211_do_open(&sdata->wdev, true);
 }
 
+static void flush_tx_skbs(struct ieee80211_sub_if_data *sdata)
+{
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct mesh_tx_queue *tx_node;
+
+	spin_lock_bh(&ifmsh->mesh_tx_queue_lock);
+
+	/* Note that this check is important because of the two-stage
+	 * way that ieee80211_if_mesh is initialized.
+	 */
+	if (ifmsh->tx_queue_len > 0) {
+		mhwmp_dbg(sdata, "flushing %d skbs", ifmsh->tx_queue_len);
+
+		while (!list_empty(&ifmsh->tx_queue.list)) {
+			tx_node = list_last_entry(&ifmsh->tx_queue.list,
+						  struct mesh_tx_queue, list);
+			kfree_skb(tx_node->skb);
+			list_del(&tx_node->list);
+			kfree(tx_node);
+		}
+		ifmsh->tx_queue_len = 0;
+	}
+
+	spin_unlock_bh(&ifmsh->mesh_tx_queue_lock);
+}
+
+static void mesh_jittered_tx(struct work_struct *wk)
+{
+	struct ieee80211_sub_if_data *sdata =
+		container_of(
+			     wk, struct ieee80211_sub_if_data,
+			     tx_work.work);
+
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct mesh_tx_queue *tx_node;
+
+	spin_lock_bh(&ifmsh->mesh_tx_queue_lock);
+
+	list_for_each_entry(tx_node, &ifmsh->tx_queue.list, list) {
+		ieee80211_tx_skb(sdata, tx_node->skb);
+	}
+
+	while (!list_empty(&ifmsh->tx_queue.list)) {
+		tx_node = list_last_entry(&ifmsh->tx_queue.list,
+					  struct mesh_tx_queue, list);
+		list_del(&tx_node->list);
+		kfree(tx_node);
+	}
+	ifmsh->tx_queue_len = 0;
+
+	spin_unlock_bh(&ifmsh->mesh_tx_queue_lock);
+}
+
 static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 			      bool going_down)
 {
@@ -880,6 +933,12 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	cancel_work_sync(&sdata->csa_finalize_work);
 
 	cancel_delayed_work_sync(&sdata->dfs_cac_timer_work);
+
+	/* Nothing to flush if the interface is not in mesh mode */
+	if (sdata->vif.type == NL80211_IFTYPE_MESH_POINT)
+		flush_tx_skbs(sdata);
+
+	cancel_delayed_work_sync(&sdata->tx_work);
 
 	if (sdata->wdev.cac_started) {
 		chandef = sdata->vif.bss_conf.chandef;
@@ -1846,6 +1905,8 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 			  ieee80211_dfs_cac_timer_work);
 	INIT_DELAYED_WORK(&sdata->dec_tailroom_needed_wk,
 			  ieee80211_delayed_tailroom_dec);
+	INIT_DELAYED_WORK(&sdata->tx_work,
+			  mesh_jittered_tx);
 
 	for (i = 0; i < NUM_NL80211_BANDS; i++) {
 		struct ieee80211_supported_band *sband;

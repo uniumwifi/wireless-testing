@@ -1381,6 +1381,8 @@ void ieee80211_mesh_init_sdata(struct ieee80211_sub_if_data *sdata)
 		    ieee80211_mesh_path_root_timer,
 		    (unsigned long) sdata);
 	INIT_LIST_HEAD(&ifmsh->preq_queue.list);
+	INIT_LIST_HEAD(&ifmsh->tx_queue.list);
+	spin_lock_init(&ifmsh->mesh_tx_queue_lock);
 	skb_queue_head_init(&ifmsh->ps.bc_buf);
 	spin_lock_init(&ifmsh->mesh_preq_queue_lock);
 	spin_lock_init(&ifmsh->sync_offset_lock);
