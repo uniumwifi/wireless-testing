@@ -356,6 +356,63 @@ static u32 airtime_link_metric_get(struct ieee80211_local *local,
 	return (u32)result;
 }
 
+// Must be called inside an rcu_read_lock block
+static void hwmp_update_ta_route_info(struct ieee80211_sub_if_data *sdata,
+					struct sta_info *sta, struct ieee80211_mgmt *mgmt,
+					const u8 *orig_addr, u32 last_hop_metric,
+					unsigned long exp_time)
+{
+	struct mesh_path *mpath;
+	const u8* ta;
+
+	ta = mgmt->sa;
+	if (!ether_addr_equal(orig_addr, ta))
+	{
+		mpath = mesh_path_lookup(sdata, ta);
+		if(mpath) {
+			spin_lock_bh(&mpath->state_lock);
+			if ((mpath->flags & MESH_PATH_FIXED) ||
+				((mpath->flags & MESH_PATH_ACTIVE) &&
+					(last_hop_metric > mpath->metric))) {
+				spin_unlock_bh(&mpath->state_lock);
+				return; // This is not fresh info; don't update
+			}
+		} else {
+			mpath = mesh_path_add(sdata, ta);
+			if (IS_ERR(mpath)) {
+				return;
+			}
+		}
+
+		spin_lock_bh(&mpath->state_lock);
+		mesh_path_assign_nexthop(mpath, sta);
+		mpath->metric = last_hop_metric;
+		mpath->exp_time = time_after(mpath->exp_time, exp_time)
+				  ?  mpath->exp_time : exp_time;
+		mesh_path_activate(mpath);
+		spin_unlock_bh(&mpath->state_lock);
+		mesh_path_tx_pending(mpath);
+	}
+}
+
+static bool is_feasible(u32 orig_sn, u32 new_metric, struct mesh_path *mpath)
+{
+	/* We can always accept newer offers, */
+	if (SN_GT(orig_sn, mpath->sn))
+		return true;
+
+	/* or the same offer but a lower cost version. (We use sent_metric
+	 * instead of total_metric because we want to continue to route to
+	 * the same next hop even when there are link fluctuations: those
+	 * will not cause loops and accepting those offers gives us a better
+	 * idea of route costs). */
+	else if (orig_sn == mpath->sn &&
+			 new_metric < mpath->metric)
+		return true;
+
+	return false;
+}
+
 /**
  * hwmp_route_info_get - Update routing info to originator and transmitter
  *
@@ -380,12 +437,10 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 	struct ieee80211_local *local = sdata->local;
 	struct mesh_path *mpath;
 	struct sta_info *sta;
-	bool fresh_info;
-	const u8 *orig_addr, *ta;
+	const u8 *orig_addr;
 	u32 orig_sn, orig_metric;
 	unsigned long orig_lifetime, exp_time;
 	u32 last_hop_metric, new_metric;
-	bool process = true;
 
 	rcu_read_lock();
 	sta = sta_info_get(sdata, mgmt->sa);
@@ -396,7 +451,6 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 
 	last_hop_metric = airtime_link_metric_get(local, sta);
 	/* Update and check originator routing info */
-	fresh_info = true;
 
 	switch (action) {
 	case MPATH_PREQ:
@@ -425,111 +479,97 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		new_metric = MAX_METRIC;
 	exp_time = TU_TO_EXP_TIME(orig_lifetime);
 
-	if (ether_addr_equal(orig_addr, sdata->vif.addr)) {
+	if (ether_addr_equal(orig_addr, sdata->vif.addr))
 		/* This MP is the originator, we are not interested in this
 		 * frame, except for updating transmitter's path info.
 		 */
-		process = false;
-		fresh_info = false;
-	} else {
-		mpath = mesh_path_lookup(sdata, orig_addr);
-		if (mpath) {
-			spin_lock_bh(&mpath->state_lock);
-			if (mpath->flags & MESH_PATH_FIXED)
-				fresh_info = false;
-			else if ((mpath->flags & MESH_PATH_ACTIVE) &&
-			    (mpath->flags & MESH_PATH_SN_VALID)) {
-				if (SN_GT(mpath->sn, orig_sn) ||
-				    (mpath->sn == orig_sn &&
-				     new_metric >= mpath->metric)) {
-					process = false;
-					fresh_info = false;
-				}
-			} else if (!(mpath->flags & MESH_PATH_ACTIVE)) {
-				bool have_sn, newer_sn, bounced;
+		goto dont_select;
 
-				have_sn = mpath->flags & MESH_PATH_SN_VALID;
-				newer_sn = have_sn && SN_GT(orig_sn, mpath->sn);
-				bounced = have_sn &&
-					  (SN_DELTA(orig_sn, mpath->sn) >
-							MAX_SANE_SN_DELTA);
+	mpath = mesh_path_lookup(sdata, orig_addr);
+	if (!mpath) {
+		mpath = mesh_path_add(sdata, orig_addr);
+		if (IS_ERR(mpath))
+			goto dont_select;
 
-				if (!have_sn || newer_sn) {
-					/* if SN is newer than what we had
-					 * then we can take it */;
-				} else if (bounced) {
-					/* if SN is way different than what
-					 * we had then assume the other side
-					 * rebooted or restarted */;
-				} else {
-					process = false;
-					fresh_info = false;
-				}
-			}
-		} else {
-			mpath = mesh_path_add(sdata, orig_addr);
-			if (IS_ERR(mpath)) {
-				rcu_read_unlock();
-				return 0;
-			}
-			spin_lock_bh(&mpath->state_lock);
-		}
-
-		if (fresh_info) {
-			mesh_path_assign_nexthop(mpath, sta);
-			mpath->flags |= MESH_PATH_SN_VALID;
-			mpath->metric = new_metric;
-			mpath->sn = orig_sn;
-			mpath->exp_time = time_after(mpath->exp_time, exp_time)
-					  ?  mpath->exp_time : exp_time;
-			mesh_path_activate(mpath);
-			spin_unlock_bh(&mpath->state_lock);
-			mesh_path_tx_pending(mpath);
-			/* draft says preq_id should be saved to, but there does
-			 * not seem to be any use for it, skipping by now
-			 */
-		} else
-			spin_unlock_bh(&mpath->state_lock);
+		spin_lock_bh(&mpath->state_lock);
+		goto select_offer;
 	}
 
-	/* Update and check transmitter routing info */
-	ta = mgmt->sa;
-	if (ether_addr_equal(orig_addr, ta))
-		fresh_info = false;
-	else {
-		fresh_info = true;
+	/* First we do a bunch of checks for different special cases to see if
+	 * it is an offer we have no choice but to accept or reject. */
+	spin_lock_bh(&mpath->state_lock);
+	if (mpath->flags & MESH_PATH_FIXED) {
+		spin_unlock_bh(&mpath->state_lock);
+		goto dont_select_but_forward;
 
-		mpath = mesh_path_lookup(sdata, ta);
-		if (mpath) {
-			spin_lock_bh(&mpath->state_lock);
-			if ((mpath->flags & MESH_PATH_FIXED) ||
-				((mpath->flags & MESH_PATH_ACTIVE) &&
-					(last_hop_metric > mpath->metric)))
-				fresh_info = false;
+	} else if (!(mpath->flags & MESH_PATH_ACTIVE)) {
+		bool have_sn, newer_sn, bounced;
+
+		have_sn = mpath->flags & MESH_PATH_SN_VALID;
+		newer_sn = have_sn && SN_GT(orig_sn, mpath->sn);
+		bounced = have_sn &&
+			  (SN_DELTA(orig_sn, mpath->sn) >
+					MAX_SANE_SN_DELTA);
+
+		/* If we're deactivated but still have a valid sn then we need
+		 * to make use of it. Otherwise we can route away from the end
+		 * point causing loops. Unfortunately if stations reboot or
+		 * bounce sn's can get out of sync so if the sn is really old
+		 * we'll take it.*/
+		if (!have_sn || newer_sn) {
+			/* if SN is newer than what we had
+			 * then we can take it */
+			goto select_offer;
+		} else if (bounced) {
+			/* if SN is way different than what
+			 * we had then assume the other side
+			 * rebooted or restarted */
+			goto select_offer;
 		} else {
-			mpath = mesh_path_add(sdata, ta);
-			if (IS_ERR(mpath)) {
-				rcu_read_unlock();
-				return 0;
-			}
-			spin_lock_bh(&mpath->state_lock);
+			spin_unlock_bh(&mpath->state_lock);
+			goto dont_select;
 		}
-
-		if (fresh_info) {
-			mesh_path_assign_nexthop(mpath, sta);
-			mpath->metric = last_hop_metric;
-			mpath->exp_time = time_after(mpath->exp_time, exp_time)
-					  ?  mpath->exp_time : exp_time;
-			mesh_path_activate(mpath);
+	} else if (mpath->flags & MESH_PATH_SN_VALID) {
+		if (!is_feasible(orig_sn, new_metric, mpath)) {
 			spin_unlock_bh(&mpath->state_lock);
-			mesh_path_tx_pending(mpath);
-		} else
-			spin_unlock_bh(&mpath->state_lock);
+			goto dont_select;
+		}
 	}
+
+	/* If we land here then we have found an offer that we can use so we
+	 * will assume it is one we should use even though that is a highly
+	 * questionable assumption. */
+
+select_offer:
+	mesh_path_assign_nexthop(mpath, sta);
+	mpath->flags |= MESH_PATH_SN_VALID;
+	mpath->metric = new_metric;
+	mpath->sn = orig_sn;
+	mpath->exp_time = time_after(mpath->exp_time, exp_time)
+			  ?  mpath->exp_time : exp_time;
+	mesh_path_activate(mpath);
+	spin_unlock_bh(&mpath->state_lock);
+	mesh_path_tx_pending(mpath);
+	/* draft says preq_id should be saved to, but there does
+	 * not seem to be any use for it, skipping by now
+	 */
+
+	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
+		last_hop_metric, exp_time);
 
 	rcu_read_unlock();
+	return new_metric;
+dont_select_but_forward:
+	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
+		last_hop_metric, exp_time);
+	rcu_read_unlock();
+	return new_metric;
 
-	return process ? new_metric : 0;
+dont_select:
+	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
+		last_hop_metric, exp_time);
+	rcu_read_unlock();
+	return 0;
 }
 
 static void hwmp_preq_frame_process(struct ieee80211_sub_if_data *sdata,
