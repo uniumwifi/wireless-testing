@@ -525,6 +525,7 @@ struct sta_info {
 		u64 bytes[IEEE80211_NUM_ACS];
 		struct ieee80211_tx_rate last_rate;
 		u64 msdu[IEEE80211_NUM_TIDS + 1];
+		unsigned long last_tx_data;
 	} tx_stats;
 	u16 tid_seq[IEEE80211_QOS_CTL_TID_MASK + 1];
 
@@ -539,6 +540,10 @@ struct sta_info {
 #endif
 
 	enum ieee80211_sta_rx_bandwidth cur_max_bandwidth;
+
+	struct timer_list feeler_timer;
+	int num_feelers;
+	u32 feeler_interval;
 
 	enum ieee80211_smps_mode known_smps_mode;
 	const struct ieee80211_cipher_scheme *cipher_scheme;

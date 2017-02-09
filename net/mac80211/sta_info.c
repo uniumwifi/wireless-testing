@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
+#include <linux/random.h>
 #include <linux/timer.h>
 #include <linux/rtnetlink.h>
 
@@ -299,6 +300,94 @@ static int sta_prepare_rate_control(struct ieee80211_local *local,
 	return 0;
 }
 
+static void feeler_tx(struct sta_info *sta)
+{
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	struct ieee80211_local *local = sdata->local;
+	struct sk_buff *skb;
+	struct ieee80211_mgmt *mgmt;
+	u8 ie_len;
+
+	/* Larger than we actually use because of all the unions but that's
+     * OK: we want to use larger packets so that we don't set throughputs
+     * to something overly optimistic. */
+	int hdr_len = offsetof(struct ieee80211_mgmt, u.action.u.mesh_action) +
+		      sizeof(mgmt->u.action.u.mesh_action);
+	skb = dev_alloc_skb(local->tx_headroom + hdr_len + 2 + 37);
+	if (!skb)
+		return;
+
+	skb_reserve(skb, local->tx_headroom);
+	mgmt = (struct ieee80211_mgmt *)skb_put(skb, hdr_len);
+	memset(mgmt, 0, hdr_len);
+	mgmt->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT |
+					 IEEE80211_STYPE_ACTION);
+
+	memcpy(mgmt->da, sta->sta.addr, ETH_ALEN);
+	memcpy(mgmt->sa, sdata->vif.addr, ETH_ALEN);
+	memcpy(mgmt->bssid, sdata->vif.addr, ETH_ALEN);
+
+	mgmt->u.action.category = WLAN_CATEGORY_MESH_ACTION;
+	mgmt->u.action.u.mesh_action.action_code =
+					WLAN_MESH_ACTION_LINK_METRIC_FEELER;
+
+	/* In order for this to be received we need to add something
+	 * but the contents don't matter. */
+	ie_len = 37;
+	(void) skb_put(skb, 2 + ie_len);
+
+	ieee80211_tx_skb(sdata, skb);
+}
+
+static void send_feelers(unsigned long data)
+{
+	/* We want a quick interval in the beginning so that we can quickly find
+	 * a decent throughput and a slow interval later so we don't eat up
+	 * bandwidth. Feelers are retried so we will get more than one shot at
+	 * sending them over bad links. On the other hand slower intervals will
+	 * cause us to miss bursts of badness. */
+	const u32 FAST_SAMPLE_INTERVAL_MS = 20;	/* 50 pps or roughly 3 kbps */
+	const u32 SLOW_SAMPLE_INTERVAL_MS = 10*1000;
+
+	struct sta_info *sta = (struct sta_info *)data;
+
+	rcu_read_lock();
+	if (!sta->dead) {
+		/* default to slow feeler interval but allow this to be
+		 * overriden by debugfs */
+		u32 interval = SLOW_SAMPLE_INTERVAL_MS;
+
+		if (sta->feeler_interval)
+			interval = sta->feeler_interval;
+		else if (sta->local->feeler_interval)
+			interval = sta->local->feeler_interval;
+
+		/* but always crank up feelers if we are just getting
+		 * started (this gives us about 64 feelers per rate) */
+		if (sta->num_feelers < 1000)
+			interval = min(FAST_SAMPLE_INTERVAL_MS, interval);
+
+		if (sta->num_feelers == 0)
+			interval += msecs_to_jiffies(prandom_u32() % 2000);
+
+		/* Send a feeler out if the link has not been active
+		 * recently. */
+		if (jiffies - sta->tx_stats.last_tx_data >=
+				2*msecs_to_jiffies(interval)/3) {
+			if (
+				interval == SLOW_SAMPLE_INTERVAL_MS)
+				ht_dbg_ratelimited(sta->sdata, "%s> to %pM",
+					__func__, sta->sta.addr);
+			feeler_tx(sta);
+			sta->num_feelers++;
+		}
+
+		mod_timer(&sta->feeler_timer, jiffies +
+			msecs_to_jiffies(interval));
+	}
+	rcu_read_unlock();
+}
+
 struct sta_info *sta_info_alloc(struct ieee80211_sub_if_data *sdata,
 				const u8 *addr, gfp_t gfp)
 {
@@ -333,6 +422,7 @@ struct sta_info *sta_info_alloc(struct ieee80211_sub_if_data *sdata,
 		    !sdata->u.mesh.user_mpm)
 			init_timer(&sta->mesh->plink_timer);
 		sta->mesh->nonpeer_pm = NL80211_MESH_POWER_ACTIVE;
+		setup_timer(&sta->feeler_timer, send_feelers, (unsigned long) sta);
 	}
 #endif
 
@@ -946,6 +1036,10 @@ static void __sta_info_destroy_part2(struct sta_info *sta)
 	__sta_info_recalc_tim(sta, true);
 
 	sta->dead = true;
+#ifdef CPTCFG_MAC80211_MESH
+	if (ieee80211_vif_is_mesh(&sta->sdata->vif))
+		del_timer_sync(&sta->feeler_timer);
+#endif
 
 	local->num_sta--;
 	local->sta_generation++;
@@ -1810,6 +1904,11 @@ int sta_info_move_state(struct sta_info *sta,
 	if (sta->sta_state == new_state)
 		return 0;
 
+#ifdef CPTCFG_MAC80211_MESH
+	if (sta->sta_state == IEEE80211_STA_AUTHORIZED && ieee80211_vif_is_mesh(&sta->sdata->vif))
+		del_timer(&sta->feeler_timer);
+#endif
+
 	/* check allowed transitions first */
 
 	switch (new_state) {
@@ -1839,6 +1938,18 @@ int sta_info_move_state(struct sta_info *sta,
 	sta_dbg(sta->sdata, "moving STA %pM to state %d\n",
 		sta->sta.addr, new_state);
 
+#ifdef CPTCFG_MAC80211_MESH
+	if (new_state == IEEE80211_STA_AUTHORIZED && ieee80211_vif_is_mesh(&sta->sdata->vif))  {
+		u32 jitter = prandom_u32();
+
+		/* We do the 1000ms wait to give the system enough time to
+		 * recover after a network restart so that Minstrel actually
+		 * is able to make use of the feelers we send out. */
+		mod_timer(&sta->feeler_timer, round_jiffies(jiffies +
+		    msecs_to_jiffies(1000 + jitter % 100)));
+		sta->num_feelers = 0;
+	}
+#endif
 	/*
 	 * notify the driver before the actual changes so it can
 	 * fail the transition

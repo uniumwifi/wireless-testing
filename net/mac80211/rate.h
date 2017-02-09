@@ -19,6 +19,13 @@
 #include "sta_info.h"
 #include "driver-ops.h"
 
+/* Feelers are unusual management packets in that they are sent out at the data
+ * rate and are retried. This turns out to be very useful when deploying mesh
+ * access points (or when checking an existing deployment) and when computing
+ * link metrics. It's possible to get this information from beacons but it's
+ * difficult to infer throughput via packets sent out at the basic rate. */
+#define WLAN_MESH_ACTION_LINK_METRIC_FEELER 17
+
 struct rate_control_ref {
 	struct ieee80211_local *local;
 	const struct rate_control_ops *ops;

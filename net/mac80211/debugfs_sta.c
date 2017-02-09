@@ -484,6 +484,63 @@ static ssize_t sta_vht_capa_read(struct file *file, char __user *userbuf,
 STA_OPS(vht_capa);
 
 
+static ssize_t sta_feeler_interval_read(struct file *file, char __user *userbuf,
+					size_t count, loff_t *ppos)
+{
+	char buf[24], *p = buf;
+	struct sta_info *sta = file->private_data;
+
+	rcu_read_lock();
+	p += scnprintf(p, sizeof(buf), "%u", sta->feeler_interval);
+	rcu_read_unlock();
+
+	return simple_read_from_buffer(userbuf, count, ppos, buf, p - buf);
+}
+
+static ssize_t sta_feeler_interval_write(
+					       struct file *file,
+					       const char __user *userbuf,
+					       size_t count, loff_t *ppos)
+{
+	char _buf[16] = {}, *buf = _buf;
+	struct sta_info *sta = file->private_data;
+	unsigned long interval;
+	int ret;
+
+	if (count > sizeof(_buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, userbuf, count))
+		return -EFAULT;
+
+	buf[sizeof(_buf) - 1] = '\0';
+
+	ret = kstrtoul(buf, 10, &interval);
+	if (ret)
+		return ret;
+
+	sta->feeler_interval = (u32) interval;
+	mhwmp_dbg(sta->sdata, "debugfs set %pM feeler interval to %lu ms",
+		sta->sta.addr, interval);
+
+#ifdef CPTCFG_MAC80211_MESH
+	if (ieee80211_vif_is_mesh(&sta->sdata->vif)) {
+		rcu_read_lock();
+		if (!sta->dead && sta->feeler_interval) {
+			/* Without this we can wait up to 10s before switching
+			 * to the new interval. */
+			mutex_lock(&sta->local->sta_mtx);
+			mod_timer(&sta->feeler_timer, jiffies + 1);
+			mutex_unlock(&sta->local->sta_mtx);
+		}
+		rcu_read_unlock();
+	}
+#endif
+
+	return count;
+}
+STA_OPS_RW(feeler_interval);
+
 #define DEBUGFS_ADD(name) \
 	debugfs_create_file(#name, 0400, \
 		sta->debugfs_dir, sta, &sta_ ##name## _ops);
@@ -532,6 +589,7 @@ void ieee80211_sta_debugfs_add(struct sta_info *sta)
 	DEBUGFS_ADD_COUNTER(rx_duplicates, rx_stats.num_duplicates);
 	DEBUGFS_ADD_COUNTER(rx_fragments, rx_stats.fragments);
 	DEBUGFS_ADD_COUNTER(tx_filtered, status_stats.filtered);
+	DEBUGFS_ADD(feeler_interval);
 
 	if (local->ops->wake_tx_queue)
 		DEBUGFS_ADD(aqm);

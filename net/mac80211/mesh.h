@@ -351,4 +351,5 @@ static inline void mesh_path_flush_by_iface(struct ieee80211_sub_if_data *sdata)
 static inline void ieee80211s_stop(void) {}
 #endif
 
+bool is_feeler(struct ieee80211_hdr *hdr);
 #endif /* IEEE80211S_H */

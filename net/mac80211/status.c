@@ -795,6 +795,9 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 			return;
 		}
 
+		if (ieee80211_is_data(hdr->frame_control) || is_feeler(hdr))
+			sta->tx_stats.last_tx_data = jiffies;
+
 		if (ieee80211_hw_check(&local->hw, HAS_RATE_CONTROL) &&
 		    (ieee80211_is_data(hdr->frame_control)) &&
 		    (rates_idx != -1))

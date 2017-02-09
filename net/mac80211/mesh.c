@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2008, 2009 open80211s Ltd.
+ * Copyright (c) 2016-2017  Jesse Jones <jjones@uniumwifi.com>
  * Authors:    Luis Carlos Cobo <luisca@cozybit.com>
  * 	       Javier Cardona <javier@cozybit.com>
  *
@@ -13,9 +14,31 @@
 #include "ieee80211_i.h"
 #include "mesh.h"
 #include "driver-ops.h"
+#include "rate.h"
 
 static int mesh_allocated;
 static struct kmem_cache *rm_cache;
+
+bool is_feeler(struct ieee80211_hdr *hdr)
+{
+	struct ieee80211_mgmt *mgmt = NULL;
+	__le16 mask = cpu_to_le16(IEEE80211_FTYPE_MGMT |
+		IEEE80211_STYPE_ACTION);
+
+	if ((hdr->frame_control & mask) == mask)
+		mgmt = (struct ieee80211_mgmt *)hdr;
+
+	return mgmt != NULL &&
+		mgmt->u.action.category == WLAN_CATEGORY_MESH_ACTION &&
+		mgmt->u.action.u.mesh_action.action_code ==
+		WLAN_MESH_ACTION_LINK_METRIC_FEELER;
+}
+
+bool mesh_action_is_feeler(struct ieee80211_mgmt *mgmt)
+{
+	return (mgmt->u.action.u.mesh_action.action_code ==
+			WLAN_MESH_ACTION_LINK_METRIC_FEELER);
+}
 
 bool mesh_action_is_path_sel(struct ieee80211_mgmt *mgmt)
 {
@@ -1259,6 +1282,8 @@ static void ieee80211_mesh_rx_mgmt_action(struct ieee80211_sub_if_data *sdata,
 	case WLAN_CATEGORY_MESH_ACTION:
 		if (mesh_action_is_path_sel(mgmt))
 			mesh_rx_path_sel_frame(sdata, mgmt, len);
+		else if (mesh_action_is_feeler(mgmt) && false && net_ratelimit())
+			pr_info("rx feeler from %pM\n", mgmt->sa);
 		break;
 	case WLAN_CATEGORY_SPECTRUM_MGMT:
 		mesh_rx_csa_frame(sdata, mgmt, len);
