@@ -145,8 +145,8 @@ struct mesh_table {
 /* Recent multicast cache */
 /* RMC_BUCKETS must be a power of 2, maximum 256 */
 #define RMC_BUCKETS		256
-#define RMC_QUEUE_MAX_LEN	4
-#define RMC_TIMEOUT		(3 * HZ)
+#define RMC_QUEUE_MAX_LEN	36
+#define RMC_TIMEOUT		(36 * HZ)
 
 /**
  * struct rmc_entry - entry in the Recent Multicast Cache
