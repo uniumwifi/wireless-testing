@@ -432,6 +432,7 @@ struct ieee80211_sta_rx_stats {
  * @dead: set to true when sta is unlinked
  * @removed: set to true when sta is being removed from sta_list
  * @uploaded: set to true when sta is uploaded to the driver
+ * @fix_link_metric: if non-zero the value to use for last hop metric value
  * @sta: station information we share with the driver
  * @sta_state: duplicates information about station state (for debug)
  * @rcu_head: RCU head used for freeing this station struct
@@ -484,6 +485,8 @@ struct sta_info {
 
 	bool uploaded;
 
+	u32 fix_link_metric;
+
 	enum ieee80211_sta_state sta_state;
 
 	/* use the accessors defined below */
@@ -525,6 +528,7 @@ struct sta_info {
 		u64 bytes[IEEE80211_NUM_ACS];
 		struct ieee80211_tx_rate last_rate;
 		u64 msdu[IEEE80211_NUM_TIDS + 1];
+		unsigned long last_tx_data;
 	} tx_stats;
 	u16 tid_seq[IEEE80211_QOS_CTL_TID_MASK + 1];
 

@@ -169,6 +169,10 @@ do {									\
 	_sdata_dbg(MAC80211_MHWMP_DEBUG,				\
 		   sdata, fmt, ##__VA_ARGS__)
 
+#define mhwmp_dbg_ratelimited(sdata, fmt, ...)				\
+	_sdata_dbg(MAC80211_MHWMP_DEBUG && net_ratelimit(),		\
+		   sdata, fmt, ##__VA_ARGS__)
+
 #define msync_dbg(sdata, fmt, ...)					\
 	_sdata_dbg(MAC80211_MESH_SYNC_DEBUG,				\
 		   sdata, fmt, ##__VA_ARGS__)

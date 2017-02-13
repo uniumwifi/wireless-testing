@@ -18,6 +18,9 @@
 #include "ieee80211_i.h"
 #include "mesh.h"
 
+/* Don't refresh paths over problematic links faster than this. */
+#define MIN_PLINK_REFRESH (5 * HZ)
+
 static void mesh_path_free_rcu(struct mesh_table *tbl, struct mesh_path *mpath);
 
 static u32 mesh_table_hash(const void *addr, u32 len, u32 seed)
@@ -494,6 +497,40 @@ int mpp_path_add(struct ieee80211_sub_if_data *sdata,
 }
 
 
+bool mesh_path_uses_nexthop(struct sta_info *sta)
+{
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	struct mesh_table *tbl = sdata->u.mesh.mesh_paths;
+	struct mesh_path *mpath;
+	struct rhashtable_iter iter;
+	int ret;
+
+	ret = rhashtable_walk_init(&tbl->rhead, &iter, GFP_ATOMIC);
+	if (ret)
+		return false;
+
+	ret = rhashtable_walk_start(&iter);
+	if (ret && ret != -EAGAIN) {
+		ret = false;
+		goto out;
+	}
+
+	while ((mpath = rhashtable_walk_next(&iter))) {
+		if (rcu_access_pointer(mpath->next_hop) == sta &&
+			mpath->flags & MESH_PATH_ACTIVE &&
+			!(mpath->flags & MESH_PATH_FIXED)) {
+			ret = true;
+			goto out;
+		}
+	}
+	ret = false;
+
+out:
+	rhashtable_walk_stop(&iter);
+	rhashtable_walk_exit(&iter);
+	return ret;
+}
+
 /**
  * mesh_plink_broken - deactivates paths and sends perr when a link breaks
  *
@@ -540,6 +577,110 @@ void mesh_plink_broken(struct sta_info *sta)
 out:
 	rhashtable_walk_stop(&iter);
 	rhashtable_walk_exit(&iter);
+}
+
+void mesh_plink_impaired(struct sta_info *sta, u32 delta_metric)
+{
+	struct mesh_path *mpath;
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	struct mesh_table *tbl = sdata->u.mesh.mesh_paths;
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct rhashtable_iter iter;
+	int ret;
+
+	ret = rhashtable_walk_init(&tbl->rhead, &iter, GFP_ATOMIC);
+	if (ret)
+		return;
+
+	ret = rhashtable_walk_start(&iter);
+	if (ret && ret != -EAGAIN)
+		goto out;
+
+	while ((mpath = rhashtable_walk_next(&iter))) {
+		if (IS_ERR(mpath) && PTR_ERR(mpath) == -EAGAIN)
+			continue;
+		if (IS_ERR(mpath))
+			break;
+
+		if (rcu_access_pointer(mpath->next_hop) == sta &&
+		    mpath->flags & MESH_PATH_ACTIVE &&
+		    !(mpath->flags & MESH_PATH_FIXED)) {
+
+			spin_lock_bh(&mpath->state_lock);
+			mhwmp_dbg(sdata, "bumped up metric to %pM via %pM by %u",
+				mpath->dst, sta->sta.addr, delta_metric);
+			if (mpath->metric < MAX_METRIC - delta_metric)
+				mpath->metric += delta_metric;
+			else
+				mpath->metric = MAX_METRIC;
+			ifmsh->sn += 6;	/* allows downstream routers to accept new routes faster */
+			spin_unlock_bh(&mpath->state_lock);
+		}
+	}
+out:
+	rhashtable_walk_stop(&iter);
+	rhashtable_walk_exit(&iter);
+}
+
+/**
+ * mesh_plink_refresh - refreshes paths routed through sta
+ *
+ * @sta: a peer router that is not working well
+ */
+void mesh_plink_refresh(struct sta_info *sta, bool throttle)
+{
+	struct mesh_path *mpath;
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	struct mesh_table *tbl = sdata->u.mesh.mesh_paths;
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct rhashtable_iter iter;
+	int ret;
+
+
+	if (!throttle || time_after(jiffies, ifmsh->last_preq + MIN_PLINK_REFRESH)) {
+		ret = rhashtable_walk_init(&tbl->rhead, &iter, GFP_ATOMIC);
+		if (ret)
+			return;
+
+		ret = rhashtable_walk_start(&iter);
+		if (ret && ret != -EAGAIN)
+			goto out;
+
+		while ((mpath = rhashtable_walk_next(&iter))) {
+			if (IS_ERR(mpath) && PTR_ERR(mpath) == -EAGAIN)
+				continue;
+			if (IS_ERR(mpath))
+				break;
+			if (rcu_access_pointer(mpath->next_hop) == sta) {
+					if (!(mpath->flags & MESH_PATH_ACTIVE)) {
+						mhwmp_dbg_ratelimited(sta->sdata, "skipping refresh to %pM because path is inactive\n", mpath->dst);
+
+					} else if (mpath->flags & MESH_PATH_RESOLVING) {
+						if (throttle) {
+							mhwmp_dbg_ratelimited(sta->sdata, "skipping refresh to %pM because path is resolving\n", mpath->dst);
+						} else {
+							mhwmp_dbg_ratelimited(sta->sdata, "extending refresh to %pM\n", mpath->dst);
+							mpath->discovery_retries = 0;
+							mpath->discovery_timeout = disc_timeout_jiff(sdata);
+						}
+
+					} else if (mpath->flags & MESH_PATH_REQ_QUEUED) {
+						mhwmp_dbg_ratelimited(sta->sdata, "skipping refresh to %pM because PREQ is queued\n", mpath->dst);
+
+					} else if (mpath->flags & MESH_PATH_FIXED) {
+						mhwmp_dbg_ratelimited(sta->sdata, "skipping refresh to %pM because path is fixed)\n", mpath->dst);
+
+					} else
+						mesh_queue_preq(mpath, PREQ_Q_F_START |
+							PREQ_Q_F_REFRESH);
+			}
+		}
+out:
+		rhashtable_walk_stop(&iter);
+		rhashtable_walk_exit(&iter);
+	} else {
+		mhwmp_dbg_ratelimited(sta->sdata, "skipping refresh because of throttling\n");
+	}
 }
 
 static void mesh_path_free_rcu(struct mesh_table *tbl,

@@ -14,12 +14,9 @@
 #include "mesh.h"
 
 #define TEST_FRAME_LEN	8192
-#define MAX_METRIC	0xffffffff
 #define ARITH_SHIFT	8
 
 #define MAX_PREQ_QUEUE_LEN	64
-
-static void mesh_queue_preq(struct mesh_path *, u8);
 
 static inline u32 u32_field_get(const u8 *preq_elem, int offset, bool ae)
 {
@@ -295,7 +292,7 @@ int mesh_path_error_tx(struct ieee80211_sub_if_data *sdata,
 	return 0;
 }
 
-void ieee80211s_update_metric(struct ieee80211_local *local,
+void airtime_update_link_metric(struct ieee80211_local *local,
 		struct sta_info *sta, struct sk_buff *skb)
 {
 	struct ieee80211_tx_info *txinfo = IEEE80211_SKB_CB(skb);
@@ -356,6 +353,53 @@ static u32 airtime_link_metric_get(struct ieee80211_local *local,
 	return (u32)result;
 }
 
+void ieee80211s_lost_packet(struct sta_info *sta, unsigned int count)
+{
+	/* Assuming rate control is decent losing every ack should be a
+	 * very rare event. So, if we do lose a packet the link is likely
+	 * developing problems so we'll refresh any paths going through it.
+	 *
+	 * But we only do this if user space is handling metrics; if airtime
+	 * is being used something similar will happen when fail_avg drops. */
+	if (sta->fix_link_metric) {
+		if (mesh_path_uses_nexthop(sta)) {
+			if (count == 5 || count == 10) {
+				/* This can introduce additional loss because we have to wait
+				 * for the new path to come up. However we can't just send a
+				 * PERR backwards because if we have a path we'll reply to
+				 * upstream PREQs. Similarly if we allow the path to expire
+				 * we'll still reply to PREQs. TODO: although it does seem
+				 * silly that expired paths stick around so long (see
+				 * MESH_PATH_EXPIRE). */
+				 mesh_plink_broken(sta);
+			} else if (count == 2) {
+				mesh_plink_refresh(sta, true);
+
+			} else if (count >= 5) {
+				mhwmp_dbg_ratelimited(sta->sdata, "link lost %u packets to %pM",
+					count, sta->sta.addr);
+			}
+		}
+	}
+}
+
+/* Called for outgoing packets. Used to update a link metric to a next hop.
+ * skb is guaranteed to be a mesh frame. */
+void ieee80211s_update_metric(struct ieee80211_local *local,
+		struct sta_info *sta, struct sk_buff *skb)
+{
+	if (!sta->fix_link_metric)
+		airtime_update_link_metric(local, sta, skb);
+}
+
+u32 mesh_get_link_metric(struct sta_info *sta)
+{
+	if (sta->fix_link_metric)
+		return sta->fix_link_metric;
+	else
+		return airtime_link_metric_get(sta->local, sta);
+}
+
 /**
  * hwmp_route_info_get - Update routing info to originator and transmitter
  *
@@ -377,7 +421,6 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 			       struct ieee80211_mgmt *mgmt,
 			       const u8 *hwmp_ie, enum mpath_frame_type action)
 {
-	struct ieee80211_local *local = sdata->local;
 	struct mesh_path *mpath;
 	struct sta_info *sta;
 	bool fresh_info;
@@ -394,7 +437,7 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		return 0;
 	}
 
-	last_hop_metric = airtime_link_metric_get(local, sta);
+	last_hop_metric = mesh_get_link_metric(sta);
 	/* Update and check originator routing info */
 	fresh_info = true;
 
@@ -655,15 +698,6 @@ static void hwmp_preq_frame_process(struct ieee80211_sub_if_data *sdata,
 	}
 }
 
-
-static inline struct sta_info *
-next_hop_deref_protected(struct mesh_path *mpath)
-{
-	return rcu_dereference_protected(mpath->next_hop,
-					 lockdep_is_held(&mpath->state_lock));
-}
-
-
 static void hwmp_prep_frame_process(struct ieee80211_sub_if_data *sdata,
 				    struct ieee80211_mgmt *mgmt,
 				    const u8 *prep_elem, u32 metric)
@@ -783,7 +817,6 @@ static void hwmp_rann_frame_process(struct ieee80211_sub_if_data *sdata,
 				    const struct ieee80211_rann_ie *rann)
 {
 	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
-	struct ieee80211_local *local = sdata->local;
 	struct sta_info *sta;
 	struct mesh_path *mpath;
 	u8 ttl, flags, hopcount;
@@ -816,7 +849,7 @@ static void hwmp_rann_frame_process(struct ieee80211_sub_if_data *sdata,
 		return;
 	}
 
-	metric_txsta = airtime_link_metric_get(local, sta);
+	metric_txsta = mesh_get_link_metric(sta);
 
 	mpath = mesh_path_lookup(sdata, orig_addr);
 	if (!mpath) {
@@ -937,7 +970,7 @@ void mesh_rx_path_sel_frame(struct ieee80211_sub_if_data *sdata,
  * Locking: the function must be called from within a rcu read lock block.
  *
  */
-static void mesh_queue_preq(struct mesh_path *mpath, u8 flags)
+void mesh_queue_preq(struct mesh_path *mpath, u8 flags)
 {
 	struct ieee80211_sub_if_data *sdata = mpath->sdata;
 	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;

@@ -15,6 +15,8 @@
 #include "ieee80211_i.h"
 #include "debugfs.h"
 #include "debugfs_sta.h"
+#include "mesh.h"
+#include "rate.h"
 #include "sta_info.h"
 #include "driver-ops.h"
 
@@ -34,6 +36,13 @@ static ssize_t sta_ ##name## _read(struct file *file,			\
 #define STA_OPS(name)							\
 static const struct file_operations sta_ ##name## _ops = {		\
 	.read = sta_##name##_read,					\
+	.open = simple_open,						\
+	.llseek = generic_file_llseek,					\
+}
+
+#define STA_OPS_W(name)							\
+static const struct file_operations sta_ ##name## _ops = {		\
+	.write = sta_##name##_write,					\
 	.open = simple_open,						\
 	.llseek = generic_file_llseek,					\
 }
@@ -297,6 +306,67 @@ static ssize_t sta_agg_status_write(struct file *file, const char __user *userbu
 }
 STA_OPS_RW(agg_status);
 
+static ssize_t sta_link_metric_read(struct file *file, char __user *userbuf,
+					size_t count, loff_t *ppos)
+{
+	char buf[24], *p = buf;
+	struct sta_info *sta = file->private_data;
+	u32 metric;
+
+	rcu_read_lock();
+
+	if (sta->fix_link_metric) {
+		metric = sta->fix_link_metric;
+		p += scnprintf(p, sizeof(buf), "%u (fixed)", metric);
+	} else {
+		metric = mesh_get_link_metric(sta);
+		p += scnprintf(p, sizeof(buf), "%u", metric);
+	}
+
+	rcu_read_unlock();
+
+	return simple_read_from_buffer(userbuf, count, ppos, buf, p - buf);
+}
+
+static ssize_t sta_link_metric_write(struct file *file,
+		const char __user *userbuf,
+		size_t count, loff_t *ppos)
+{
+	char _buf[16] = {}, *buf = _buf;
+	struct sta_info *sta = file->private_data;
+	unsigned long metric, old_metric;
+	int ret;
+
+	if (count > sizeof(_buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, userbuf, count))
+		return -EFAULT;
+
+	buf[sizeof(_buf) - 1] = '\0';
+
+	ret = kstrtoul(buf, 10, &metric);
+	if (ret)
+		return ret;
+
+	old_metric = sta->fix_link_metric;
+	metric = min_t(unsigned long, metric, MAX_METRIC);
+	sta->fix_link_metric = metric;
+	pr_info("set %pM metric to %ld (debugfs)\n", sta->sta.addr, metric);
+
+	 /* This link seems to be getting really bad so we want paths
+	  * going through the link to be able to re-route as quickly as
+	  * possible. Normally that can be slow because the path will
+	  * typically have a good metric from when the link was good.
+	  * But if we deactivate the paths then we'll be able to immediately
+	  * choose the best nexthop. */
+	if (old_metric != 0 && metric > old_metric && metric - old_metric > 1000)
+		(void) mesh_plink_impaired(sta, metric - old_metric);
+
+	return count;
+}
+STA_OPS_RW(link_metric);
+
 static ssize_t sta_ht_capa_read(struct file *file, char __user *userbuf,
 				size_t count, loff_t *ppos)
 {
@@ -483,6 +553,18 @@ static ssize_t sta_vht_capa_read(struct file *file, char __user *userbuf,
 }
 STA_OPS(vht_capa);
 
+static ssize_t sta_refresh_paths_write(
+					       struct file *file,
+					       const char __user *userbuf,
+					       size_t count, loff_t *ppos)
+{
+	struct sta_info *sta = file->private_data;
+
+	mesh_plink_refresh(sta, false);
+
+	return count;
+}
+STA_OPS_W(refresh_paths);
 
 #define DEBUGFS_ADD(name) \
 	debugfs_create_file(#name, 0400, \
@@ -526,12 +608,13 @@ void ieee80211_sta_debugfs_add(struct sta_info *sta)
 	DEBUGFS_ADD(num_ps_buf_frames);
 	DEBUGFS_ADD(last_seq_ctrl);
 	DEBUGFS_ADD(agg_status);
+	DEBUGFS_ADD(link_metric);
 	DEBUGFS_ADD(ht_capa);
 	DEBUGFS_ADD(vht_capa);
-
 	DEBUGFS_ADD_COUNTER(rx_duplicates, rx_stats.num_duplicates);
 	DEBUGFS_ADD_COUNTER(rx_fragments, rx_stats.fragments);
 	DEBUGFS_ADD_COUNTER(tx_filtered, status_stats.filtered);
+	DEBUGFS_ADD(refresh_paths);
 
 	if (local->ops->wake_tx_queue)
 		DEBUGFS_ADD(aqm);

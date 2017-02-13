@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2008, 2009 open80211s Ltd.
+ * Copyright 2016  Jesse Jones <jjones@cococorp.com>
  * Authors:    Luis Carlos Cobo <luisca@cozybit.com>
  *             Javier Cardona <javier@cozybit.com>
  *
@@ -15,6 +16,15 @@
 #include <linux/jhash.h>
 #include "ieee80211_i.h"
 
+/* Formerly 0xffffffff but that can cause overflow problems when using ewma_add.
+ * The metric is in units of 10us so 10M == 100M us == 100s which should be
+ * more than large enough even for multiple hops over crappy links. And, even
+ * if the mesh is very large there's not much point in being able to distinguish
+ * between different very bad paths. */
+#define MAX_METRIC	(10*1000*1000)
+
+#define disc_timeout_jiff(s) \
+	msecs_to_jiffies(sdata->u.mesh.mshcfg.min_discovery_timeout)
 
 /* Data structures */
 
@@ -244,6 +254,7 @@ void ieee80211_mps_frame_release(struct sta_info *sta,
 				 struct ieee802_11_elems *elems);
 
 /* Mesh paths */
+u32 mesh_get_link_metric(struct sta_info *sta);
 int mesh_nexthop_lookup(struct ieee80211_sub_if_data *sdata,
 			struct sk_buff *skb);
 int mesh_nexthop_resolve(struct ieee80211_sub_if_data *sdata,
@@ -276,6 +287,9 @@ void mesh_neighbour_update(struct ieee80211_sub_if_data *sdata,
 bool mesh_peer_accepts_plinks(struct ieee802_11_elems *ie);
 u32 mesh_accept_plinks_update(struct ieee80211_sub_if_data *sdata);
 void mesh_plink_broken(struct sta_info *sta);
+void mesh_plink_impaired(struct sta_info *sta, u32 delta_metric);
+void mesh_plink_refresh(struct sta_info *sta, bool throttle);
+bool mesh_path_uses_nexthop(struct sta_info *sta);
 u32 mesh_plink_deactivate(struct sta_info *sta);
 u32 mesh_plink_open(struct sta_info *sta);
 u32 mesh_plink_block(struct sta_info *sta);
@@ -302,6 +316,7 @@ void mesh_path_discard_frame(struct ieee80211_sub_if_data *sdata,
 void mesh_path_tx_root_frame(struct ieee80211_sub_if_data *sdata);
 
 bool mesh_action_is_path_sel(struct ieee80211_mgmt *mgmt);
+void mesh_queue_preq(struct mesh_path *mpath, u8 flags);
 
 #ifdef CONFIG_MAC80211_MESH
 static inline
@@ -343,6 +358,7 @@ static inline bool mesh_path_sel_is_hwmp(struct ieee80211_sub_if_data *sdata)
 void mesh_path_flush_by_iface(struct ieee80211_sub_if_data *sdata);
 void mesh_sync_adjust_tsf(struct ieee80211_sub_if_data *sdata);
 void ieee80211s_stop(void);
+void ieee80211s_lost_packet(struct sta_info *sta, unsigned int count);
 #else
 static inline bool mesh_path_sel_is_hwmp(struct ieee80211_sub_if_data *sdata)
 { return false; }
@@ -350,5 +366,12 @@ static inline void mesh_path_flush_by_iface(struct ieee80211_sub_if_data *sdata)
 {}
 static inline void ieee80211s_stop(void) {}
 #endif
+
+static inline struct sta_info *
+	next_hop_deref_protected(const struct mesh_path *mpath)
+{
+	return rcu_dereference_protected(mpath->next_hop,
+		lockdep_is_held(&mpath->state_lock));
+}
 
 #endif /* IEEE80211S_H */

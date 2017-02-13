@@ -574,6 +574,11 @@ static void ieee80211_lost_packet(struct sta_info *sta,
 		return;
 
 	sta->status_stats.lost_packets++;
+#ifdef CPTCFG_MAC80211_MESH
+	if (ieee80211_vif_is_mesh(&sta->sdata->vif))
+		ieee80211s_lost_packet(sta, sta->status_stats.lost_packets);
+#endif
+
 	if (!sta->sta.tdls &&
 	    sta->status_stats.lost_packets < STA_LOST_PKT_THRESHOLD)
 		return;
@@ -794,6 +799,9 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 			rcu_read_unlock();
 			return;
 		}
+
+		if (ieee80211_is_data(hdr->frame_control))
+			sta->tx_stats.last_tx_data = jiffies;
 
 		if (ieee80211_hw_check(&local->hw, HAS_RATE_CONTROL) &&
 		    (ieee80211_is_data(hdr->frame_control)) &&
