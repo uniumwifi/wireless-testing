@@ -1198,34 +1198,57 @@ void mesh_path_timer(unsigned long data)
 {
 	struct mesh_path *mpath = (void *) data;
 	struct ieee80211_sub_if_data *sdata = mpath->sdata;
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	bool multiple_discoveries = ifmsh->mshcfg.always_max_discoveries;
 	int ret;
 
 	if (sdata->local->quiescing)
 		return;
 
 	spin_lock_bh(&mpath->state_lock);
-	if (mpath->flags & MESH_PATH_RESOLVED ||
-			(!(mpath->flags & MESH_PATH_RESOLVING))) {
-		mpath->flags &= ~(MESH_PATH_RESOLVING | MESH_PATH_RESOLVED);
-		spin_unlock_bh(&mpath->state_lock);
-	} else if (mpath->discovery_retries < max_preq_retries(sdata)) {
-		++mpath->discovery_retries;
-		mpath->discovery_timeout *= 2;
-		mpath->flags &= ~MESH_PATH_REQ_QUEUED;
-		spin_unlock_bh(&mpath->state_lock);
-		mesh_queue_preq(mpath, 0);
+	if (!multiple_discoveries) {
+		if (mpath->flags & MESH_PATH_RESOLVED ||
+		    (!(mpath->flags & MESH_PATH_RESOLVING))) {
+			mpath->flags &= ~(MESH_PATH_RESOLVING |
+					  MESH_PATH_RESOLVED);
+			spin_unlock_bh(&mpath->state_lock);
+			return;
+		} else if (mpath->discovery_retries < max_preq_retries(sdata)) {
+			++mpath->discovery_retries;
+			mpath->discovery_timeout *= 2;
+			mpath->flags &= ~MESH_PATH_REQ_QUEUED;
+			spin_unlock_bh(&mpath->state_lock);
+			mesh_queue_preq(mpath, 0);
+			return;
+		}
 	} else {
-		mpath->flags &= ~(MESH_PATH_RESOLVING |
-				  MESH_PATH_RESOLVED |
-				  MESH_PATH_REQ_QUEUED);
-		mpath->exp_time = jiffies;
-		spin_unlock_bh(&mpath->state_lock);
-		if (!mpath->is_gate && mesh_gate_num(sdata) > 0) {
-			ret = mesh_path_send_to_gates(mpath);
-			if (ret)
-				mhwmp_dbg(sdata, "no gate was reachable\n");
-		} else
-			mesh_path_flush_pending(mpath);
+		if (mpath->discovery_retries < max_preq_retries(sdata)) {
+			++mpath->discovery_retries;
+			mpath->discovery_timeout *= 2;
+			mpath->flags &= ~MESH_PATH_REQ_QUEUED;
+			spin_unlock_bh(&mpath->state_lock);
+			mesh_queue_preq(mpath, 0);
+			return;
+		} else if (mpath->flags & MESH_PATH_RESOLVED ||
+			   (!(mpath->flags & MESH_PATH_RESOLVING))) {
+			mpath->flags &= ~(MESH_PATH_RESOLVING |
+					  MESH_PATH_RESOLVED);
+			spin_unlock_bh(&mpath->state_lock);
+			return;
+		}
+	}
+
+	mpath->flags &= ~(MESH_PATH_RESOLVING |
+			  MESH_PATH_RESOLVED |
+			  MESH_PATH_REQ_QUEUED);
+	mpath->exp_time = jiffies;
+	spin_unlock_bh(&mpath->state_lock);
+	if (!mpath->is_gate && mesh_gate_num(sdata) > 0) {
+		ret = mesh_path_send_to_gates(mpath);
+		if (ret)
+			mhwmp_dbg(sdata, "no gate was reachable\n");
+	} else {
+		mesh_path_flush_pending(mpath);
 	}
 }
 

@@ -3449,6 +3449,8 @@ enum nl80211_mesh_power_mode {
  *	established peering with for longer than this time (in seconds), then
  *	remove it from the STA's list of peers. You may set this to 0 to disable
  *	the removal of the STA. Default is 30 minutes.
+ * @NL80211_MESHCONF_HWMP_ALWAYS_MAX_DISCOVERIES: whether to always perform
+ *	number of discovery attempts equal to MaxPREQretries (default is FALSE)
  *
  * @__NL80211_MESHCONF_ATTR_AFTER_LAST: internal use
  */
@@ -3482,6 +3484,7 @@ enum nl80211_meshconf_params {
 	NL80211_MESHCONF_POWER_MODE,
 	NL80211_MESHCONF_AWAKE_WINDOW,
 	NL80211_MESHCONF_PLINK_TIMEOUT,
+	NL80211_MESHCONF_HWMP_ALWAYS_MAX_DISCOVERIES,
 
 	/* keep last */
 	__NL80211_MESHCONF_ATTR_AFTER_LAST,

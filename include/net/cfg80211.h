@@ -1382,6 +1382,8 @@ struct bss_parameters {
  * @plink_timeout: If no tx activity is seen from a STA we've established
  *	peering with for longer than this time (in seconds), then remove it
  *	from the STA's list of peers.  Default is 30 minutes.
+ * @always_max_discoveries: whether to always perform number of discovery
+ *	attemts equal to dot11MeshHWMPmaxPREQretries
  */
 struct mesh_config {
 	u16 dot11MeshRetryTimeout;
@@ -1412,6 +1414,7 @@ struct mesh_config {
 	enum nl80211_mesh_power_mode power_mode;
 	u16 dot11MeshAwakeWindowDuration;
 	u32 plink_timeout;
+	bool always_max_discoveries;
 };
 
 /**
