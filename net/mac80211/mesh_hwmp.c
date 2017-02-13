@@ -436,11 +436,13 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 {
 	struct ieee80211_local *local = sdata->local;
 	struct mesh_path *mpath;
-	struct sta_info *sta;
+	struct sta_info *sta, *current_sta = NULL;
 	const u8 *orig_addr;
 	u32 orig_sn, orig_metric;
 	unsigned long orig_lifetime, exp_time;
 	u32 last_hop_metric, new_metric;
+	u8 *current_next_hop = NULL;
+	const u8 *target = NULL;
 
 	rcu_read_lock();
 	sta = sta_info_get(sdata, mgmt->sa);
@@ -458,6 +460,7 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		orig_sn = PREQ_IE_ORIG_SN(hwmp_ie);
 		orig_lifetime = PREQ_IE_LIFETIME(hwmp_ie);
 		orig_metric = PREQ_IE_METRIC(hwmp_ie);
+		target = PREQ_IE_TARGET_ADDR(hwmp_ie);
 		break;
 	case MPATH_PREP:
 		/* Originator here refers to the MP that was the target in the
@@ -469,6 +472,7 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		orig_sn = PREP_IE_TARGET_SN(hwmp_ie);
 		orig_lifetime = PREP_IE_LIFETIME(hwmp_ie);
 		orig_metric = PREP_IE_METRIC(hwmp_ie);
+		target = PREP_IE_ORIG_ADDR(hwmp_ie);
 		break;
 	default:
 		rcu_read_unlock();
@@ -498,6 +502,11 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 	/* First we do a bunch of checks for different special cases to see if
 	 * it is an offer we have no choice but to accept or reject. */
 	spin_lock_bh(&mpath->state_lock);
+	if (mpath->flags & MESH_PATH_ACTIVE) {
+		current_sta = next_hop_deref_protected(mpath);
+		current_next_hop = current_sta->sta.addr;
+	}
+
 	if (mpath->flags & MESH_PATH_FIXED) {
 		spin_unlock_bh(&mpath->state_lock);
 		goto dont_select_but_forward;
@@ -536,9 +545,23 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		}
 	}
 
-	/* If we land here then we have found an offer that we can use so we
-	 * will assume it is one we should use even though that is a highly
-	 * questionable assumption. */
+	/* If we land here then we have found a feasible path. But just because
+	 * it is feasible doesn't mean that it is a path that we want to use.
+	 * For example, it could be new information from a really horrible link. */
+	if (new_metric < mpath->metric) {
+		goto select_offer;
+
+	} else if (ether_addr_equal(
+			   mgmt->sa, current_next_hop)) {
+		goto select_offer;
+
+	} else if (current_sta != NULL && current_sta->status_stats.lost_packets >= 2) {
+		goto select_offer;
+
+	} else {
+		spin_unlock_bh(&mpath->state_lock);
+		goto dont_select;
+	}
 
 select_offer:
 	mesh_path_assign_nexthop(mpath, sta);
