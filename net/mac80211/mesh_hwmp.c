@@ -356,45 +356,6 @@ static u32 airtime_link_metric_get(struct ieee80211_local *local,
 	return (u32)result;
 }
 
-// Must be called inside an rcu_read_lock block
-static void hwmp_update_ta_route_info(struct ieee80211_sub_if_data *sdata,
-					struct sta_info *sta, struct ieee80211_mgmt *mgmt,
-					const u8 *orig_addr, u32 last_hop_metric,
-					unsigned long exp_time)
-{
-	struct mesh_path *mpath;
-	const u8* ta;
-
-	ta = mgmt->sa;
-	if (!ether_addr_equal(orig_addr, ta))
-	{
-		mpath = mesh_path_lookup(sdata, ta);
-		if(mpath) {
-			spin_lock_bh(&mpath->state_lock);
-			if ((mpath->flags & MESH_PATH_FIXED) ||
-				((mpath->flags & MESH_PATH_ACTIVE) &&
-					(last_hop_metric > mpath->metric))) {
-				spin_unlock_bh(&mpath->state_lock);
-				return; // This is not fresh info; don't update
-			}
-		} else {
-			mpath = mesh_path_add(sdata, ta);
-			if (IS_ERR(mpath)) {
-				return;
-			}
-		}
-
-		spin_lock_bh(&mpath->state_lock);
-		mesh_path_assign_nexthop(mpath, sta);
-		mpath->metric = last_hop_metric;
-		mpath->exp_time = time_after(mpath->exp_time, exp_time)
-				  ?  mpath->exp_time : exp_time;
-		mesh_path_activate(mpath);
-		spin_unlock_bh(&mpath->state_lock);
-		mesh_path_tx_pending(mpath);
-	}
-}
-
 static bool is_feasible(u32 orig_sn, u32 new_metric, struct mesh_path *mpath)
 {
 	/* We can always accept newer offers, */
@@ -553,21 +514,13 @@ select_offer:
 	/* draft says preq_id should be saved to, but there does
 	 * not seem to be any use for it, skipping by now
 	 */
-
-	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
-		last_hop_metric, exp_time);
-
 	rcu_read_unlock();
 	return new_metric;
 dont_select_but_forward:
-	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
-		last_hop_metric, exp_time);
 	rcu_read_unlock();
 	return new_metric;
 
 dont_select:
-	hwmp_update_ta_route_info(sdata, sta, mgmt, orig_addr,
-		last_hop_metric, exp_time);
 	rcu_read_unlock();
 	return 0;
 }
