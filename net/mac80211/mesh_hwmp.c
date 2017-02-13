@@ -295,6 +295,23 @@ int mesh_path_error_tx(struct ieee80211_sub_if_data *sdata,
 	return 0;
 }
 
+void ieee80211s_frame_acked(struct sta_info *sta, struct sk_buff *skb,
+			    bool acked)
+{
+	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
+	struct mesh_path *mpath = mesh_path_lookup(sta->sdata, hdr->addr3);
+
+	if (acked && mpath) {
+		/* If the frame we have sent out has been acked then we know
+		* it has made it at least one hop and we can assume that the
+		* path is working. If not we'll get a PERR back when someone
+		* downstream cannot forward it. */
+		mpath->exp_time = jiffies +
+		msecs_to_jiffies(
+			sta->sdata->u.mesh.mshcfg.dot11MeshHWMPactivePathTimeout);
+	}
+}
+
 void ieee80211s_update_metric(struct ieee80211_local *local,
 		struct sta_info *sta, struct sk_buff *skb)
 {
@@ -1204,7 +1221,9 @@ void mesh_path_timer(unsigned long data)
 		mpath->discovery_timeout *= 2;
 		mpath->flags &= ~MESH_PATH_REQ_QUEUED;
 		spin_unlock_bh(&mpath->state_lock);
-		mesh_queue_preq(mpath, 0);
+		/* We do a refresh because, on discovery, we want to do the full
+		 * path forwarding to ensure that we are getting the best path. */
+		mesh_queue_preq(mpath, PREQ_Q_F_REFRESH);
 	} else {
 		mpath->flags &= ~(MESH_PATH_RESOLVING |
 				  MESH_PATH_RESOLVED |
